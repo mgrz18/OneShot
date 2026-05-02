@@ -44,6 +44,8 @@ EC120-F5 1.0
 EC220-G5 2.0
 EV-2009-02-06
 Enhanced Wireless Router F6D4230-4 v1
+GPON ONT GPON ONT
+GN256VH GN256VH
 Home Internet Center KEENETIC series
 Home Internet Center Keenetic series
 Huawei Wireless Access Point RT2860
@@ -151,8 +153,12 @@ WPS Router RT-N56UB1
 WPS Router RT-N65U
 WPS Router RT-N300
 WR5570 2011-05-13
+XC220-G3v 1.0
 ZyXEL NBG-416N AP Router
 ZyXEL NBG-416N AP Router NBG-416N
 ZyXEL NBG-418N AP Router
 ZyXEL NBG-418N AP Router NBG-418N
 ZyXEL Wireless AP Router NBG-417N
+Modem/Router EV-2010-09-20
+RB06 RT2860
+RB03 RT2860
