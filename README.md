@@ -151,4 +151,5 @@ Launch online WPS bruteforce with the specified first half of the PIN:
 ## Special Thanks
 * `rofl0r` for initial implementation;
 * `Monohrom` for testing, help in catching bugs, some ideas;
-* `Wiire` for developing Pixiewps.
+* `Wiire` for developing Pixiewps;
+* `drydryg` for his amazing work on `rofl0r` repo.
