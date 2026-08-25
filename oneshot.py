@@ -16,7 +16,17 @@ import collections
 import statistics
 from pathlib import Path
 from typing import Dict
-import wcwidth
+try:
+    import wcwidth
+except ImportError:
+    # Fallback si no está instalado (p.ej. Termux sin 'pip install wcwidth'):
+    # se degrada a ancho por carácter; la tabla puede desalinear en chars anchos (CJK)
+    # pero el programa NO truena. Ver README / install.sh para la alineación correcta.
+    class _WcwidthFallback:
+        @staticmethod
+        def wcswidth(text):
+            return len(text)
+    wcwidth = _WcwidthFallback()
 import csv
 
 

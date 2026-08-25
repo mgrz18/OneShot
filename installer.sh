@@ -2,6 +2,9 @@
 pkg install -y root-repo 
 pkg install -y git tsu python wpa-supplicant pixiewps iw
 
+# wcwidth es un módulo de Python (no un paquete de Termux): va por pip
+pip install wcwidth || pip3 install wcwidth
+
 git clone --depth 1 https://github.com/mgrz18/OneShot OneShot
 
 chmod +x OneShot/oneshot.py

@@ -86,6 +86,10 @@ Please note that root access is required.
  pkg install -y root-repo
  pkg install -y git tsu python wpa-supplicant pixiewps iw openssl
  ```
+ **Installing the Python dependency (wcwidth)**
+ ```
+ pip install wcwidth
+ ```
 **Getting OneShot**
  ```
  git clone --depth 1 https://github.com/mgrz18/OneShot OneShot
